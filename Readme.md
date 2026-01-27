@@ -16,95 +16,314 @@
 
 ---
 
-## 1. Настройка окружения
-
-Сначала создаём виртуальное окружение:
-
-```bash
-python -m venv venv
-```
-
-Активируем его:
-
-```bash
-venv\Scripts\activate
-```
-
-Теперь установим библиотеку OpenAI:
-
-```bash
-pip install openai
-```
-
-Создадим файл `requirements.txt` и скопируем в него список установленных библиотек.
-```bash
-pip freeze > requirements.txt
-```
-
-Чтобы хранить API-ключ безопасно, создаём файл **`.env`** в корне
-проекта:
-
-```plaintext
-OPENAI_API_KEY=your-api-key-here
-```
-
-**Важно!** Добавьте `.env` в `.gitignore`, чтобы не загрузить ключ в
-репозиторий.
-
-### Полезные советы:
-
-1.  API-ключ берём [в личном кабинете
-    OpenAI](https://platform.openai.com/api-keys).
-2.  Никому не передавайте свой ключ!
-3.  Создайте файл `requirements.txt`, чтобы сохранить список
-    зависимостей:
-
-```bash
-pip freeze > requirements.txt
-```
-
-## 2. Обращение к OpenAI Responses API
-
-Создаём файл **`main.py`** и пишем базовый код:
+## 1. Весь код
 
 ```python
-import sys
-from openai import OpenAI
-from dotenv import load_dotenv
 import os
+import sqlite3
+import requests
+from dotenv import load_dotenv
+
 
 load_dotenv()
 
-api_key = os.getenv("OPENAI_API_KEY")
+HF_API_KEY = os.getenv("HF_API_KEY")
+SYSTEM_PROMPT = os.getenv(
+    "SYSTEM_PROMPT",
+    "Ты вежливая и хорошая булочка."
+)
 
-client = OpenAI(api_key=api_key)
+BASE_URL = "https://router.huggingface.co/v1/chat/completions"
+MODEL_NAME = "openai/gpt-oss-120b"
 
-def get_response(text: str, client: OpenAI):
-    response = client.responses.create(model="gpt-5", input=text)
-    return response
+DB_NAME = "prompts.db"
+MAX_MEMORY = 6  
+temperature = 0.7
+
+
+
+def get_db():
+    return sqlite3.connect(DB_NAME)
+
+
+def init_db():
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+
+def save_prompt(name: str, content: str) -> bool:
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO prompts (name, content) VALUES (?, ?)",
+                (name, content)
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def list_prompts():
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT id, name, content FROM prompts ORDER BY created_at DESC"
+        ).fetchall()
+
+
+def load_prompt(prompt_id: int):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT content FROM prompts WHERE id = ?",
+            (prompt_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def delete_prompt(prompt_id: int):
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM prompts WHERE id = ?",
+            (prompt_id,)
+        )
+
+
+
+def save_message(role: str, content: str):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO chat_memory (role, content) VALUES (?, ?)",
+            (role, content)
+        )
+
+        conn.execute(f"""
+            DELETE FROM chat_memory
+            WHERE id NOT IN (
+                SELECT id FROM chat_memory
+                ORDER BY created_at DESC
+                LIMIT {MAX_MEMORY}
+            )
+        """)
+
+
+def load_memory():
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT role, content
+            FROM chat_memory
+            ORDER BY created_at ASC
+        """).fetchall()
+
+    return [{"role": r, "content": c} for r, c in rows]
+
+
+def clear_memory():
+    with get_db() as conn:
+        conn.execute("DELETE FROM chat_memory")
+
+
+def print_history():
+    memory = load_memory()
+    if not memory:
+        print("История пуста.")
+        return
+
+    print("\n=== История диалога ===")
+    for msg in memory:
+        role = "USER" if msg["role"] == "user" else "AI"
+        print(f"{role}: {msg['content']}")
+    print("======================\n")
+
+
+
+def call_llm(messages, temp: float):
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "temperature": temp
+    }
+
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    r = requests.post(BASE_URL, json=payload, headers=headers)
+
+    if r.status_code != 200:
+        return f"Ошибка API: {r.status_code} {r.text}"
+
+    try:
+        return r.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Ошибка парсинга ответа: {e}"
+
+
+
+def print_help():
+    print("""
+Команды:
+  exit                 — выход (память очищается)
+  history              — показать историю диалога
+  settemp <0-1>        — изменить temperature
+  setprompt            — задать системный промпт
+  showprompt           — показать текущий промпт
+  saveprompt           — сохранить промпт в БД
+  loadprompt           — загрузить промпт из БД
+  listprompts          — список всех промптов
+  deleteprompt         — удалить промпт
+""")
+
+
+
+def run_chat():
+    global SYSTEM_PROMPT, temperature
+
+    init_db()
+
+    print("=== Консольный AI ассистент ===")
+    print(f"Промпт: {SYSTEM_PROMPT}")
+    print(f"Temperature: {temperature}")
+    print_help()
+
+    while True:
+        user_input = input("Вы: ").strip()
+        if not user_input:
+            continue
+
+        cmd = user_input.lower()
+
+        if cmd == "exit":
+            clear_memory()
+            print("Память сессии очищена.")
+            print("Выход.")
+            break
+
+        if cmd == "history":
+            print_history()
+            continue
+
+        if cmd.startswith("settemp"):
+            try:
+                value = float(cmd.split()[1])
+                if 0 <= value <= 1:
+                    temperature = value
+                    print(f"✓ temperature = {temperature}")
+                else:
+                    print("✗ значение от 0 до 1")
+            except:
+                print("✗ пример: settemp 0.7")
+            continue
+
+        if cmd == "setprompt":
+            text = input("Новый системный промпт: ").strip()
+            if text:
+                SYSTEM_PROMPT = text
+                print("✓ Промпт обновлён")
+            continue
+
+        if cmd == "showprompt":
+            print("\nSYSTEM PROMPT:")
+            print(SYSTEM_PROMPT)
+            continue
+
+        if cmd == "saveprompt":
+            name = input("Название промпта: ").strip()
+            if save_prompt(name, SYSTEM_PROMPT):
+                print("✓ Промпт сохранён")
+            else:
+                print("✗ Такое имя уже существует")
+            continue
+
+        if cmd == "listprompts":
+            prompts = list_prompts()
+            if not prompts:
+                print("Промптов нет")
+                continue
+            for pid, name, content in prompts:
+                print(f"[{pid}] {name} — {content[:60]}")
+            continue
+
+        if cmd == "loadprompt":
+            pid = int(input("ID промпта: "))
+            text = load_prompt(pid)
+            if text:
+                SYSTEM_PROMPT = text
+                print("✓ Промпт загружен")
+            else:
+                print("✗ Не найден")
+            continue
+
+        if cmd == "deleteprompt":
+            pid = int(input("ID промпта: "))
+            delete_prompt(pid)
+            print("✓ Удалено")
+            continue
+
+
+
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages.extend(load_memory())
+        messages.append({"role": "user", "content": user_input})
+
+        answer = call_llm(messages, temperature)
+        print("AI:", answer)
+
+        save_message("user", user_input)
+        save_message("assistant", answer)
+
+
+
+if __name__ == "__main__":
+    run_chat()
+
 ```
 
-Что здесь происходит:
+Вот так это выглядит в консоли
+<img width="968" height="401" alt="image_2026-01-27_12-44-39 (3)" src="https://github.com/user-attachments/assets/fed30e16-ceed-40b6-9860-61d70ea0f936" />
 
-- **Импорты**:
+## 2. Задания
 
-  - `sys` - работа с системными функциями.
-  - `OpenAI` - основной класс для API.
-  - `load_dotenv` - загружает переменные из `.env`.
-  - `os` - для доступа к переменным окружения.
 
-- **Настройка окружения**: Загружаем `.env` и достаём API-ключ:
 
-  ```python
-  load_dotenv()
-  api_key = os.getenv("OPENAI_API_KEY")
+- **Реализация промтов**:
+
+  - Основной промт хранится в файле .env
+  <img width="1178" height="55" alt="image" src="https://github.com/user-attachments/assets/774f2e64-a991-44a5-8001-0fca21c5821c" />
+
+  - Дополнительно пользователь может создавать и удалять промты в консоли в режиме реального времени с помощью команд `setprompt`— задать системный промпт,`showprompt`— показать текущий промпт,`saveprompt`— сохранить промпт в БД,`loadprompt`— загрузить промпт из БД,`listprompts`— список всех промптов, `deleteprompt`— удалить промпт.
+  <img width="378" height="177" alt="image" src="https://github.com/user-attachments/assets/a910fe39-c2b4-41d9-bbe2-c50df12aa080" />
+
+  - Добавление промта и его сохранение.
+  <img width="593" height="253" alt="image" src="https://github.com/user-attachments/assets/d20774a3-4855-4e07-8c8e-c0f756d3eedd" />
+
+  - А так же хранение предидущих промтов в других сессиях
+  <img width="974" height="428" alt="image" src="https://github.com/user-attachments/assets/d4985e3f-b3c8-4754-a569-5252bee97497" />
+
+
+- **Температура**: 
+
+  -Изначально по дефолту у нас стоит температура в коде на значении 0.7
+    ```python
+    temperature = 0.7
   ```
-
-- **Создаём клиента OpenAI**:
-
-  ```python
-  client = OpenAI(api_key=api_key)
-  ```
+Путем экспериментов с температурой я попробовала взять значение равной 1
+И на примере рецепта вареных яиц он выдал вот что:
 
 - **Функция для запроса к API**:
 
@@ -187,3 +406,4 @@ if __name__ == "__main__":
 3. Реализовать ведение истории диалога (контекста переписки с ассистентом), чтобы ИИ помнил, о чём пользователь с ним разговаривал. Длину истории сообщений ограничить до 6 последних сообщений (3 пользовательских, 3 ИИшных).
 
 ---
+
