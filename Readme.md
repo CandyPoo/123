@@ -335,84 +335,70 @@ if __name__ == "__main__":
 
 - **История диалогов**:
 
-  ```python
-  def get_response(text: str, client: OpenAI):
-      response = client.responses.create(model="gpt-5", input=text)
-      return response
-  ```
-
----
-
-## 3. Главный цикл
-
-Теперь добавляем интерактивное общение:
-
+ Я использовала библиотеку 
 ```python
-if __name__ == "__main__":
-    print("Введите ваш вопрос (или 'exit' для выхода):")
-    while True:
-        question = input("Вы: ")
-        if question.lower() == "exit":
-            print("Завершение программы.")
-            break
-        answer = get_response(question, client)
-        print("AI:", answer.output_text)
-```
+        import sqlite3
+  ```
+И на основе этой библиотеки сделала вот такую часть в коде с базой данных которая будет хранить 3 сообщения от пользователя и 3 от ИИ.
+```python
+    def save_message(role: str, content: str):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO chat_memory (role, content) VALUES (?, ?)",
+            (role, content)
+        )
 
-Как это работает:
+        conn.execute(f"""
+            DELETE FROM chat_memory
+            WHERE id NOT IN (
+                SELECT id FROM chat_memory
+                ORDER BY created_at DESC
+                LIMIT {MAX_MEMORY}
+            )
+        """)
 
-- Программа запустится, только если её вызвать напрямую;
-- Показываем пользователю подсказку;
-- Запускаем бесконечный цикл общения;
-- Если введено `exit` - выходим;
-- Иначе отправляем запрос в API и выводим ответ.
 
----
+def load_memory():
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT role, content
+            FROM chat_memory
+            ORDER BY created_at ASC
+        """).fetchall()
 
-## 4. Troubleshooting
+    return [{"role": r, "content": c} for r, c in rows]
 
-### Ошибка авторизации
 
-    openai.error.AuthenticationError: Incorrect API key provided
+def clear_memory():
+    with get_db() as conn:
+        conn.execute("DELETE FROM chat_memory")
 
-Проверьте ключ в `.env` и его путь.
 
-### Модуль не найден
+def print_history():
+    memory = load_memory()
+    if not memory:
+        print("История пуста.")
+        return
 
-    ModuleNotFoundError: No module named 'openai'
+    print("\n=== История диалога ===")
+    for msg in memory:
+        role = "USER" if msg["role"] == "user" else "AI"
+        print(f"{role}: {msg['content']}")
+    print("======================\n")
 
-Активируйте виртуальное окружение и установите библиотеку.
+  ```
+  Как это выглядит на практике 
+  <img width="1030" height="565" alt="image" src="https://github.com/user-attachments/assets/213c9b48-03c0-4068-b90e-b3fcf19856ca" />
+Мы видим что он выводит нам всю историю чата, но когда мы добавляем новые запросы, то все что было удаляется.
+<img width="170" height="533" alt="image" src="https://github.com/user-attachments/assets/5f40e4d8-faaa-4c11-ada8-4ab64f09995c" />
 
-### Ошибка сети
 
-    openai.error.APIConnectionError: Connection timeout
-
-Проверьте интернет, брандмауэр, попробуйте VPN (скорее всего проблема в отсутствии VPN :-D).
-
-### Ошибка запроса
-
-    openai.error.InvalidRequestError
-
-Проверьте:
-
-- Название модели;
-- Длину текста;
-- Формат данных.
-
-### Превышен лимит запросов
-
-    openai.error.RateLimitError
-
-Проверьте лимиты и добавьте задержку при повторных запросах.
-
----
-
-## 5. Задание
+## 3. Задание Выполнено ураааа
 
 1. Реализовать использование `системного промпта` через переменную окружения .env, либо через ручной ввод/выбор промпта и его сохраниение в базу данных при выборе соответствующей опции в терминале;
 2. Поиграться с параметром `temperature` в настройках языковой модели, проанализировать поведение языковой модели, результат отразить в отчёте;
 3. Реализовать ведение истории диалога (контекста переписки с ассистентом), чтобы ИИ помнил, о чём пользователь с ним разговаривал. Длину истории сообщений ограничить до 6 последних сообщений (3 пользовательских, 3 ИИшных).
 
----
+
 
 
