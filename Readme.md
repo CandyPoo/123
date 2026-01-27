@@ -25,6 +25,8 @@
 ```bash
 git clone https://github.com/oobabooga/text-generation-webui
 ```
+<img width="819" height="162" alt="image" src="https://github.com/user-attachments/assets/c272d95f-1bed-449e-8b01-a77503cd2c4e" />
+
 * После копирования репозитория перейдите в его директорию:
 ```bash
 cd text-generation-webui
@@ -68,4 +70,5 @@ python server.py
 3. Поиграйтесь с параметрами модели (temperature, top_p, top_k, repetition_penalty, и т.д.), проанализируйте результат, опишите в отчёте.
 
 ---
+
 
